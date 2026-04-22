@@ -7,7 +7,8 @@ This repository provides instructions for running Hermes Agent with a custom LLM
 
 ## Prerequisites
 - AI Toolkit already installed and running on Ubuntu with CUDA, Docker, and vLLM operational.
-- Access to two hosts (or a multi-node setup) each with 2 GPUs (total 4 GPUs) for tensor parallelism.
+- Two hosts (each with 2 GPUs, total 4 GPUs) connected via high-speed network (e.g., InfiniBand or RoCE).
+- A Ray cluster initialized across the two hosts for distributed tensor parallelism.
 - The Nemotron-3-120B model (or compatible) available for deployment.
 
 ## Step 1: Download the Nemotron Model
@@ -15,43 +16,56 @@ Use Hugging Face CLI to download the model weights to your local storage:
 ```bash
 huggingface-cli download nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 --local-dir /ai/models/NVIDIA/Nemotron-3-120B
 ```
-Ensure you have sufficient disk space and that the directory is accessible from the hosts where vLLM will run.
+Ensure you have sufficient disk space and that the directory is accessible from both hosts.
 
-## Step 2: Deploy the LLM with vLLM (Tensor Parallelism)
-On each host, start the vLLM server with tensor parallelism size 2 (2 GPUs per host). The settings below are tested and optimized for the AI Toolkit environment.
+## Step 2: Deploy the LLM with vLLM using Ray for Tensor Parallelism
+vLLM runs on a single host (designated as the VLLM host) but uses Ray to distribute tensor parallelism across both hosts (TP=4 over 4 GPUs total: 2 GPUs per host).
 
-**Explanation of key flags:**
-- `--tensor-parallel-size 2`: Splits the model across 2 GPUs per host. Communication between these GPUs uses NVIDIA NCCL over the high-speed backend network (NVLink or InfiniBand depending on your setup).
-- For multi-host tensor parallelism (spanning both hosts), vLLM uses the same NCCL-based backend for exchanging tensor parallelism traffic between hosts. Ensure the hosts can reach each other over the network (typically via the same fabric used for NCCL) and that required ports are open.
-- `--distributed-executor-backend mp`: Uses multiprocessing for distributed execution, which works well with NCCL.
-- `--pipeline-parallel-size 1`: No pipeline parallelism in this test; only tensor parallelism is used.
-- `--host 0.0.0.0 --port 8000`: Binds the vLLM API server to all interfaces on port 8000.
-
-Example command on **Host A** (adjust model path if needed):
+### Environment Variables
+Set these on the host where you will run the vLLm server (adjust values as needed for your network):
 ```bash
-python -m vllm.entrypoints.api_server \
-    --model /ai/models/NVIDIA/Nemotron-3-120B \
-    --tensor-parallel-size 2 \
-    --pipeline-parallel-size 1 \
-    --distributed-executor-backend mp \
-    --host 0.0.0.0 \
-    --port 8000
+export VLLM_HOST_IP=1.1.1.11          # IP address of the vLLM host (for Hermes Agent to connect)
+export NCCL_SOCKET_IFNAME=ens7f0np0   # Backend interface name used for NCCL/TP traffic
+export NCCL_DEBUG=TRACE               # Optional: for troubleshooting first runs
+export PYTORCH_ALLOC_CONF=expandable_segments:True  # Helps with memory fragmentation
 ```
 
-Example command on **Host B** (same settings):
+### vLLM Serve Command
+Run the following command on the vLLM host (ensure Ray cluster is up and the model path is correct):
 ```bash
-python -m vllm.entrypoints.api_server \
-    --model /ai/models/NVIDIA/Nemotron-3-120B \
-    --tensor-parallel-size 2 \
-    --pipeline-parallel-size 1 \
-    --distributed-executor-backend mp \
-    --host 0.0.0.0 \
-    --port 8000
+vllm serve /ai/models/NVIDIA-Nemotron-3-120B/ \
+  --api-key LLM \
+  --tensor-parallel-size 4 \
+  --distributed-executor-backend ray \
+  --port 8000 \
+  --trust-remote-code \
+  --tool-call-parser qwen3_coder \
+  --enable-auto-tool-choice \
+  --enable-chunked-prefill \
+  --reasoning-parser nemotron_v3 \
+  --host 0.0.0.0 \
+  --gpu-memory-utilization 0.85
 ```
 
-> **Note:** For multi-host tensor parallelism, you may need to set additional environment variables (e.g., `VLLM_HOSTS` or use a launcher script) as per the vLLM documentation. Verify that the backend network (used for NCCL and TP traffic) is configured and that firewalls allow communication between the hosts on the necessary ports.
+**Key points about this setup:**
+- **Single vLLM host**: The vLLM server process runs on only one host (the host with IP `VLLM_HOST_IP`).
+- **Ray cluster for distribution**: Ray manages distributing the tensor parallelism across both hosts. You must have a Ray cluster running with one host as head node and the other as worker.
+- **Tensor Parallelism 4**: The model is split across 4 GPUs total (2 GPUs on each host).
+- **Backend network**: The `NCCL_SOCKET_IFNAME` (ens7f0np0) should be configured for high-speed communication between hosts for NCCL-based tensor parallelism traffic.
+- **First-time troubleshooting**: Keep `NCCL_DEBUG=TRACE` to see detailed logs; remove or set to WARN/ERROR once stable.
 
-3. Verify the API is accessible from each host: `curl http://<host_ip>:8000/v1/models` should return the model list.
+**Ray cluster setup (prerequisite):**
+On the head node (typically one of your two hosts):
+```bash
+ray start --head --port=6379
+```
+On the worker node (the other host):
+```bash
+ray start --address <head_node_ip>:6379
+```
+Verify with `ray status` or `ray list nodes`.
+
+3. Verify the API is accessible from the Hermes Agent host: `curl http://<VLLM_HOST_IP>:8000/v1/models` should return the model list.
 
 ## Step 3: Install Hermes Agent
 1. Clone the Hermes Agent repository (if not already present):
@@ -71,8 +85,8 @@ python -m vllm.entrypoints.api_server \
    ```yaml
    model:
      type: custom
-     base_url: "http://<vllm_host_ip>:8000/v1"   # Use one of the host IPs; if load‑balanced, use the LB address.
-     api_key: "your-api-key-if-required"          # Optional, set if vLLM requires auth.
+     base_url: "http://<VLLM_HOST_IP>:8000/v1"   # Use the VLLM_HOST_IP set above
+     api_key: "LLM"                               # Must match the --api-key used in vllm serve
      model_name: "nemotron-3-120B"
      # Additional parameters for chat/completions
      max_tokens: 2048
@@ -82,14 +96,17 @@ python -m vllm.entrypoints.api_server \
 
 ## Step 5: Test the Integration
 1. Start Hermes Agent (or your custom agent script) and send a prompt that requires chain‑of‑thought reasoning.
-2. Verify that the response is generated via the vLLM endpoint (check logs on the vLLM servers for incoming requests).
+2. Verify that the response is generated via the vLLM endpoint (check logs on the vLLM server for incoming requests).
 3. If successful, you have Hermes Agent running with a powerful LLM backend.
 
 ## Troubleshooting
-- **Connection refused**: Confirm the vLLM server is running and accessible from the Hermes host (`telnet <vllm_ip> 8000`).
+- **Connection refused**: Confirm the vLLM server is running and accessible from the Hermes host (`telnet <VLLM_HOST_IP> 8000`).
 - **Model not found**: Ensure the model name in the request matches what vLLM serves.
-- **Performance issues**: Verify GPU utilization and that tensor parallelism is correctly set (check vLLM logs for TP size). Ensure the backend network used for NCCL and TP traffic is healthy and not saturated.
+- **Performance issues**: Verify GPU utilization and that tensor parallelism is correctly set (TP=4). Check Ray and vLLM logs for errors. Ensure the backend network (NCCL_SOCKET_IFNAME) is healthy and not saturated.
+- **Ray issues**: Verify Ray cluster status with `ray status` or `ray list nodes`. Ensure both hosts can communicate on the Ray port (default 6379).
+- **NCCL issues**: If seeing NCCL errors, verify `NCCL_SOCKET_IFNAME` is correct and that the interface is operational on both hosts.
 
 ## Notes
 - The instructions assume a working AI Toolkit with Docker and CUDA; deploying vLLM may require the `vllm` Docker image or a native pip install adjusted for your environment.
-- For production, consider using a reverse proxy, load balancer, or Kubernetes service to front the vLLM instances.
+- For production, consider using a reverse proxy, load balancer, or Kubernetes service to front the vLLM instance.
+- The `--api-key LLM` value must match exactly between the vLLM serve command and Hermes Agent configuration.
