@@ -111,14 +111,39 @@ The following diagram shows how the two hosts communicate for Ray clustering and
 
 **Ray cluster setup (prerequisite):**
 You can run the Ray start commands directly, or use the provided scripts:
+
+**Manually from command line:**
 ```bash
 # On the head node (Host 1):
 export VLLM_HOST_IP=1.1.1.11
+conda activate vllm-2
+ray start \
+  --head \
+  --port=6379 \
+  --dashboard-port=8265 \
+  --num-gpus=2 \
+  --node-ip-address 1.1.1.11 \
+  --metrics-export-port=8001
+
+# On the worker node (Host 2):
+export VLLM_HOST_IP=1.1.1.12
+conda activate vllm-2
+ray start \
+  --address=1.1.1.11:6379 \
+  --node-ip-address 1.1.1.12
+```
+
+**Using the provided scripts:**
+```bash
+# On the head node (Host 1):
+export VLLM_HOST_IP=1.1.1.11
+conda activate vllm-2
 chmod +x scripts/start_ray_head.sh
 ./scripts/start_ray_head.sh
 
 # On the worker node (Host 2):
 export VLLM_HOST_IP=1.1.1.12
+conda activate vllm-2
 chmod +x scripts/start_ray_worker.sh
 ./scripts/start_ray_worker.sh 1.1.1.11  # Pass the head node IP as argument
 ```
@@ -128,17 +153,21 @@ Verify with `ray status` or `ray list nodes`.
 3. Verify the API is accessible from the Hermes Agent host: `curl http://<VLLM_HOST_IP>:8000/v1/models` should return the model list.
 
 ## Step 4: Install Hermes Agent
-# Linux
+To install Hermes Agent on the AI Toolkit (Ubuntu 22.04), follow these steps:
+
+```bash
+# Download and run the installer
 curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 
-After installation, run:
-source ~/.bashrc  # or source ~/.zshrc
+# After installation, source your shell profile to update the PATH
+source ~/.bashrc  # or source ~/.zshrc if using zsh
 
-Then when running Hermes:
-1. Choose a provider
-2. Select "Hermes model" 
-3. Choose "Custom model"
-4. Provide the URL for VLLM (http://<VLLM_HOST_IP>:8000/v1) and key (LLM)
+# Then when running Hermes:
+# 1. Choose a provider
+# 2. Select "Hermes model"
+# 3. Choose "Custom model"
+# 4. Provide the URL for VLLM (http://<VLLM_HOST_IP>:8000/v1) and key (LLM)
+```
 
 For more info: https://hermes-agent.nousresearch.com/docs/getting-started/quickstart
 

@@ -2,6 +2,13 @@
 # Script to start Ray worker node
 # Usage: ./start_ray_worker.sh <head_node_ip>
 
+# Check if we are in the correct conda environment
+if [ "$CONDA_DEFAULT_ENV" != "vllm-2" ]; then
+  echo "Error: This script must be run in the 'vllm-2' conda environment."
+  echo "Please activate it with: conda activate vllm-2"
+  exit 1
+fi
+
 # Exit on any error
 set -e
 
