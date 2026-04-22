@@ -1,12 +1,10 @@
 # Hermes Agent on AI Toolkit
 
-See the AI Toolkit: https://github.com/pl247/ai-toolkit-2.0
-
 ## Overview
 This repository provides instructions for running Hermes Agent with a custom LLM served via vLLM on the AI Toolkit.
 
 ## Prerequisites
-- AI Toolkit already installed and running on Ubuntu with CUDA, Docker, and vLLM operational.
+- AI Toolkit already installed and running on Ubuntu with CUDA, Docker, and vLLM operational. See: https://github.com/pl247/ai-toolkit-2.0
 - Two hosts (each with 2 GPUs, total 4 GPUs) connected via high-speed network (e.g., InfiniBand or RoCE).
 - A Ray cluster initialized across the two hosts for distributed tensor parallelism.
 - The Nemotron-3-120B model (or compatible) available for deployment.
@@ -46,8 +44,9 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True  # Helps with memory fragment
 ```
 
 ### vLLM Serve Command
-Run the following command on the vLLM host (ensure Ray cluster is up and the model path is correct):
+You can run the vLLM serve command directly, or use the provided script:
 ```bash
+# Direct command:
 vllm serve /ai/models/NVIDIA-Nemotron-3-120B/ \
   --api-key LLM \
   --tensor-parallel-size 4 \
@@ -60,59 +59,38 @@ vllm serve /ai/models/NVIDIA-Nemotron-3-120B/ \
   --reasoning-parser nemotron_v3 \
   --host 0.0.0.0 \
   --gpu-memory-utilization 0.85
+
+# Or using the script (make sure to set environment variables first):
+chmod +x scripts/start_vllm.sh
+./scripts/start_vllm.sh
 ```
 
 ### Network Communication Diagram
 The following diagram shows how the two hosts communicate for Ray clustering and how Hermes Agent talks to the LLM locally:
 
 ```
-+---------------------+      FRONTEND NETWORK (Gigabit Ethernet)      +---------------------+
-|     Host 1 (Head)   |                                               |     Host 2          |
-|                     |                                               |                     |
-|  +--------------+   |                               +-------------+   |  +--------------+  |
-|  |              |   |                               |             |   |  |              |  |
-|  |  Ray Head    |<--+-------------------------------+  Ray Worker |-->|  |              |  |
-|  |  Node        |   |                               |             |   |  |  vLLM Server |  |
-|  |  (1.1.1.11)  |   |                               |   (1.1.1.12)|   |  |              |  |
-|  +--------------+   |                               +-------------+   |  +------+-------+  |
-|        ^            |                                       ^              |             |
-|        |            |                                       |              |             |
-|        | Backend    |                                       | Backend      |             |
-|        | Network    |                                       | Network      |             |
-|        | (ens7f0np0)|                                       | (ens7f0np0)  |             |
-|        |            |                                       |              |             |
-+--------|------------+                                       +--------------+             |
-         |                                                                        |
-         |                                                                        |
-         |                                                                        |
-         |                                                                        |
-+--------|------------+                                       +----------------+--------+
-|        |            |                                       |                |
-|  +-----v------+     |                                       |  +-----v------+  |
-|  |             |     |                                       |  |             |  |
-|  | Hermes      |     |                                       |  |             |  |
-|  | Agent       |     |                                       |  |             |  |
-|  | (on Host 1) |     |                                       |  |             |  |
-|  +-------------+     |                                       |  +-------------+  |
-|        ^             |                                       |                |
-|        |             |                                       |                |
-|        | Local       |                                       |                |
-|        | Connection  |                                       |                |
-|        | (no internet)|                                      |                |
-|        |             |                                       |                |
-+--------|-------------+                                       +----------------+
-         |
-         +------------------> http://1.1.1.11:8000/v1  (vLLM API)
+FRONTEND NETWORK (192.168.1.x)        BACKEND NETWORK (1.1.1.x)
+Host 1 (Head)         Host 2            Host 1 (Head)         Host 2
+  .------.              .------.            .------.              .------.
+  | Ray  |              | Ray  |            | vLLM |              |        |
+  | Head |<------------>|Worker|            |Server|<------------>|        |
+  '------'              '------'            '------'              '------'
+    192.168.1.11          192.168.1.12          1.1.1.11              1.1.1.12
+      ^                    ^                       ^                    ^
+      |                    |                       |                    |
+      |    Hermes Agent    |                       |                    |
+      |    (on Host 1)     |                       |                    |
+      +------------------------------> http://1.1.1.11:8000/v1  <--------+
                               (private, internal network only)
 ```
 
 **Key points about this setup:**
-- **Single vLLM host**: The vLLM server process runs on only one host (Host 2 with IP `VLLM_HOST_IP`).
+- **Single vLLM host**: The vLLM server process runs on only one host (Host 1 with IP `VLLM_HOST_IP`).
 - **Ray cluster for distribution**: Ray manages distributing the tensor parallelism across both hosts. Host 1 is the head node, Host 2 is the worker.
 - **Tensor Parallelism 4**: The model is split across 4 GPUs total (2 GPUs on each host).
-- **Frontend Network**: Used for Ray dashboard, metadata exchange, and initial cluster setup (typically Gigabit Ethernet).
-- **Backend Network**: Used for high-performance NCCL-based tensor parallelism traffic between hosts (InfiniBand/RoCE via `ens7f0np0`).
-- **Local Connection**: Hermes Agent talks directly to the vLLM server on the same host (Host 2) via private IP - no internet traffic involved.
+- **Frontend Network**: Used for Ray dashboard, metadata exchange, and initial cluster setup (typically 192.168.1.x subnet).
+- **Backend Network**: Used for high-performance NCCL-based tensor parallelism traffic between hosts (1.1.1.x subnet via `ens7f0np0`).
+- **Local Connection**: Hermes Agent talks directly to the vLLM server on the same host (Host 1) via private IP - no internet traffic involved.
 - **First-time troubleshooting**: Keep `NCCL_DEBUG=TRACE` to see detailed logs; remove or set to WARN/ERROR once stable.
 
 ### Why This Is Private and Secure
@@ -123,55 +101,44 @@ The following diagram shows how the two hosts communicate for Ray clustering and
 - **Security Benefits**: Reduced attack surface, no external dependencies, better performance, data sovereignty
 
 **Ray cluster setup (prerequisite):**
-On the head node (Host 1):
+You can run the Ray start commands directly, or use the provided scripts:
 ```bash
+# On the head node (Host 1):
 export VLLM_HOST_IP=1.1.1.11
-ray start \
- --head \
- --port=6379 \
- --dashboard-port=8265 \
- --num-gpus=2 \
- --node-ip-address 1.1.1.11 \
- --metrics-export-port=8001 
+chmod +x scripts/start_ray_head.sh
+./scripts/start_ray_head.sh
+
+# On the worker node (Host 2):
+export VLLM_HOST_IP=1.1.1.12
+chmod +x scripts/start_ray_worker.sh
+./scripts/start_ray_worker.sh 1.1.1.11  # Pass the head node IP as argument
 ```
 
-On the worker node (Host 2):
-```bash
-export VLLM_HOST_IP=1.1.1.12
-ray start \
- --address=1.1.1.11:6379 \
- --node-ip-address 1.1.1.12
-```
 Verify with `ray status` or `ray list nodes`.
 
 3. Verify the API is accessible from the Hermes Agent host: `curl http://<VLLM_HOST_IP>:8000/v1/models` should return the model list.
 
 ## Step 4: Install Hermes Agent
-1. Clone the Hermes Agent repository (if not already present):
-   ```bash
-   git clone https://github.com/hermesagent/hermes-agent.git
-   cd hermes-agent
-   ```
-2. Follow the Hermes Agent installation instructions (typically via pip or conda). Ensure you install any required dependencies.
-   ```bash
-   pip install -e .
-   ```
-   or follow the official guide.
+# Linux
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+
+After installation, run:
+source ~/.bashrc  # or source ~/.zshrc
+
+Then when running Hermes:
+1. Choose a provider
+2. Select "Hermes model" 
+3. Choose "Custom model"
+4. Provide the URL for VLLM (http://<VLLM_HOST_IP>:8000/v1) and key (LLM)
+
+For more info: https://hermes-agent.nousresearch.com/docs/getting-started/quickstart
 
 ## Step 5: Configure Hermes Agent to Use the Custom vLLM Endpoint
-1. Create or edit the Hermes Agent configuration file (e.g., `config.yaml`) to point to your vLLM server.
-   Example configuration:
-   ```yaml
-   model:
-     type: custom
-     base_url: "http://<VLLM_HOST_IP>:8000/v1"   # Use the VLLM_HOST_IP set above
-     api_key: "LLM"                               # Must match the --api-key used in vllm serve
-     model_name: "nemotron-3-120B"
-     # Additional parameters for chat/completions
-     max_tokens: 2048
-     temperature: 0.7
-   ```
-2. Ensure Hermes Agent can reach the vLLM host (network connectivity, no firewall blocks).
+Once Hermes Agent is installed and running, configure it to use your vLLM server:
+- Base URL: http://<VLLM_HOST_IP>:8000/v1
+- API Key: LLM
+- Model Name: nemotron-3-120B
+- Additional parameters as needed (max_tokens, temperature, etc.)
 
 ## Step 6: Test the Integration
 1. Start Hermes Agent (or your custom agent script) and send a prompt that requires chain‑of‑thought reasoning.
@@ -191,3 +158,4 @@ Verify with `ray status` or `ray list nodes`.
 - For production, consider using a reverse proxy, load balancer, or Kubernetes service to front the vLLM instance.
 - The `--api-key LLM` value must match exactly between the vLLM serve command and Hermes Agent configuration.
 - All traffic between hosts and to Hermes Agent remains on private networks - no internet exposure for LLM interactions.
+- Helper scripts are available in the `scripts/` directory to simplify Ray cluster and vLLM server startup.
