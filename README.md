@@ -5,7 +5,7 @@ This repository provides instructions for running Hermes Agent with a custom LLM
 
 ## Prerequisites
 - AI Toolkit already installed and running on Ubuntu with CUDA, Docker, and vLLM operational. See: https://github.com/pl247/ai-toolkit-2.0
-- Two hosts (each with 2 GPUs, total 4 GPUs) connected via high-speed network (e.g., InfiniBand or RoCE).
+- Two hosts (each with 2 GPUs, total 4 GPUs) connected via high-speed network (e.g., RDMA over Converged Ethernet (RoCE)).
 - A Ray cluster initialized across the two hosts for distributed tensor parallelism.
 - The Nemotron-3-120B model (or compatible) available for deployment.
 
@@ -25,11 +25,11 @@ pip install "ray[default]"
 ```
 
 ## Step 2: Download the Nemotron Model
-Use Hugging Face CLI to download the model weights to your local storage:
+The AI Toolkit has created a directory on each host called `/ai/models` for storing models. Use Hugging Face CLI to download the model weights to your local storage:
 ```bash
 huggingface-cli download nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 --local-dir /ai/models/NVIDIA/Nemotron-3-120B
 ```
-Ensure you have sufficient disk space and that the directory is accessible from both hosts.
+Ensure you have sufficient disk space. If you don't have shared storage between the hosts, you need to make sure the model is copied to the local disk of each host (you can run this command on both hosts or copy the directory between them).
 
 ## Step 3: Deploy the LLM with vLLM using Ray for Tensor Parallelism
 vLLM runs on a single host (designated as the VLLM host) but uses Ray to distribute tensor parallelism across both hosts (TP=4 over 4 GPUs total: 2 GPUs per host).
@@ -69,36 +69,45 @@ chmod +x scripts/start_vllm.sh
 The following diagram shows how the two hosts communicate for Ray clustering and how Hermes Agent talks to the LLM locally:
 
 ```
-FRONTEND NETWORK (192.168.1.x)        BACKEND NETWORK (1.1.1.x)
-Host 1 (Head)         Host 2            Host 1 (Head)         Host 2
-  .------.              .------.            .------.              .------.
-  | Ray  |              | Ray  |            | vLLM |              |        |
-  | Head |<------------>|Worker|            |Server|<------------>|        |
-  '------'              '------'            '------'              '------'
-    192.168.1.11          192.168.1.12          1.1.1.11              1.1.1.12
-      ^                    ^                       ^                    ^
-      |                    |                       |                    |
-      |    Hermes Agent    |                       |                    |
-      |    (on Host 1)     |                       |                    |
-      +------------------------------> http://1.1.1.11:8000/v1  <--------+
-                              (private, internal network only)
+                      FRONTEND NETWORK (192.168.1.x)
+               Host 1 (Head)         Host 2
+                 .------.              .------.
+                 | vLLM |              |      |
+                 |Server|              |      |
+                 '------'              '------'
+                   1.1.1.11              1.1.1.12
+                     ^                      ^
+                     |     Hermes Agent     |
+                     |    (on Host 1)       |
+                     +--------> http://192.168.1.11:8000/v1  <----------+
+                               (private, internal network only)
+
+                      BACKEND NETWORK (1.1.1.x) 
+               Host 1 (Head)         Host 2
+                 .------.              .------.
+                 | Ray  |              | Ray  |
+                 |Head  |<------------>|Worker|  <-- Ray communication (control plane + tensor parallelism via NCCL over RoCE)
+                 '------'              '------'
+                   1.1.1.11              1.1.1.12
 ```
 
 **Key points about this setup:**
 - **Single vLLM host**: The vLLM server process runs on only one host (Host 1 with IP `VLLM_HOST_IP`).
 - **Ray cluster for distribution**: Ray manages distributing the tensor parallelism across both hosts. Host 1 is the head node, Host 2 is the worker.
 - **Tensor Parallelism 4**: The model is split across 4 GPUs total (2 GPUs on each host).
-- **Frontend Network**: Used for Ray dashboard, metadata exchange, and initial cluster setup (typically 192.168.1.x subnet).
-- **Backend Network**: Used for high-performance NCCL-based tensor parallelism traffic between hosts (1.1.1.x subnet via `ens7f0np0`).
-- **Local Connection**: Hermes Agent talks directly to the vLLM server on the same host (Host 1) via private IP - no internet traffic involved.
+- **Frontend Network (192.168.1.x)**: Used for the vLLM API server that Hermes Agent connects to (http://192.168.1.11:8000/v1).
+- **Backend Network (1.1.1.x)**: Used for Ray cluster communication, including:
+  - Control plane messages (task scheduling, metadata)
+  - High-performance NCCL-based tensor parallelism traffic between hosts for serving the Nemotron AI model over vLLM/ray (GPU-GPU communication for model parallelism using RoCE)
+- **Local Connection**: Hermes Agent talks directly to the vLLM server on Host 1 via the frontend network (192.168.1.11) - this is still a private network connection.
 - **First-time troubleshooting**: Keep `NCCL_DEBUG=TRACE` to see detailed logs; remove or set to WARN/ERROR once stable.
 
-### Why This Is Private and Secure
-- **No Internet Exposure**: All communication happens on private internal networks
-- **Frontend Network**: Isolated cluster management traffic
-- **Backend Network**: Dedicated high-speed interconnect for GPU communication
-- **Local API Access**: Hermes Agent connects directly to vLLM on the same host
-- **Security Benefits**: Reduced attack surface, no external dependencies, better performance, data sovereignty
+### Benefit of running Hermes to a local LLM
+- **Reduced internet exposure**: Most communication happens on private networks (both frontend and backend networks are internal)
+- **Data privacy**: Data between the Hermes agent and the LLM is not exposed to a public AI model - your prompts and responses stay within your infrastructure
+- **Cost savings**: You don't have to pay for tokens that the agent uses. An agent like OpenClaw can consume thousands of tokens per day in normal operation, which would incur significant costs with public APIs
+- **Performance**: Low-latency, high-throughput communication within your private network
+- **Control**: Full control over the model, versions, and infrastructure
 
 **Ray cluster setup (prerequisite):**
 You can run the Ray start commands directly, or use the provided scripts:
@@ -151,11 +160,11 @@ Once Hermes Agent is installed and running, configure it to use your vLLM server
 - **Performance issues**: Verify GPU utilization and that tensor parallelism is correctly set (TP=4). Check Ray and vLLM logs for errors. Ensure the backend network (NCCL_SOCKET_IFNAME) is healthy and not saturated.
 - **Ray issues**: Verify Ray cluster status with `ray status` or `ray list nodes`. Ensure both hosts can communicate on the Ray port (default 6379).
 - **NCCL issues**: If seeing NCCL errors, verify `NCCL_SOCKET_IFNAME` is correct and that the interface is operational on both hosts.
-- **Frontend/Backend confusion**: Ensure frontend network is used for Ray clustering and dashboard, backend network (ens7f0np0) is used for NCCL/GPU communication.
+- **Frontend/Backend confusion**: Ensure frontend network is used for the vLLM API (Hermes Agent connection), backend network (ens7f0np0) is used for Ray cluster communication and NCCL/GPU communication.
 
 ## Notes
 - The instructions assume a working AI Toolkit with Docker and CUDA; deploying vLLM may require the `vllm` Docker image or a native pip install adjusted for your environment.
 - For production, consider using a reverse proxy, load balancer, or Kubernetes service to front the vLLM instance.
 - The `--api-key LLM` value must match exactly between the vLLM serve command and Hermes Agent configuration.
-- All traffic between hosts and to Hermes Agent remains on private networks - no internet exposure for LLM interactions.
+- All traffic between hosts and to Hermes Agent remains on private networks - reduced internet exposure for LLM interactions.
 - Helper scripts are available in the `scripts/` directory to simplify Ray cluster and vLLM server startup.
