@@ -4,7 +4,7 @@
 This repository provides instructions for running Hermes Agent with a custom LLM served via vLLM on the AI Toolkit.
 
 ## Prerequisites
-- AI Toolkit already installed and running on Ubuntu with CUDA, Docker, and vLLM operational. See: https://github.com/pl247/ai-toolkit-2.0
+- AI Toolkit already installed and running on Ubuntu with CUDA 12.2, Docker, and vLLM operational. See: https://github.com/pl247/ai-toolkit-2.0
 - Two hosts (each with 2 GPUs, total 4 GPUs) connected via high-speed network (e.g., RDMA over Converged Ethernet (RoCE)).
 - A Ray cluster initialized across the two hosts for distributed tensor parallelism.
 - The Nemotron-3-120B model (or compatible) available for deployment.
