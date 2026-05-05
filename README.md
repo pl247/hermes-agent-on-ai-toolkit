@@ -67,6 +67,7 @@ chmod +x scripts/start_vllm.sh
 
 ### Network Communication Diagram
 
+```
 ┌───────────────────────────┐
 │       HERMES AGENT        │
 └─────────────┬─────────────┘
@@ -94,6 +95,7 @@ chmod +x scripts/start_vllm.sh
 └─────────────┬──────────────────────────────┘   └─────────────────────────────────┬──────────┘
               │                                                                    │
 ──────────────┴── BACKEND NETWORK · Ray Control Plane · NCCL/RoCE ─────────────────┴──────────
+```
 
 **Key points about this setup:**
 - **Single vLLM host**: The vLLM server process runs on only one host (Host 1 with IP `VLLM_HOST_IP`).
