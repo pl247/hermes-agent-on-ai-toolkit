@@ -66,30 +66,34 @@ chmod +x scripts/start_vllm.sh
 ```
 
 ### Network Communication Diagram
-The following diagram shows how the two hosts communicate for Ray clustering and how Hermes Agent talks to the LLM locally:
 
-```
-                      FRONTEND NETWORK (192.168.1.x)
-               Host 1 (Head)         Host 2
-                 .------.              .------.
-                 | vLLM |              |      |
-                 |Server|              |      |
-                 '------'              '------'
-                   1.1.1.11              1.1.1.12
-                     ^                      ^
-                     |     Hermes Agent     |
-                     |    (on Host 1)       |
-                     +--------> http://192.168.1.11:8000/v1  <----------+
-                               (private, internal network only)
-
-                      BACKEND NETWORK (1.1.1.x) 
-               Host 1 (Head)         Host 2
-                 .------.              .------.
-                 | Ray  |              | Ray  |
-                 |Head  |<------------>|Worker|  <-- Ray communication (control plane + tensor parallelism via NCCL over RoCE)
-                 '------'              '------'
-                   1.1.1.11              1.1.1.12
-```
+┌───────────────────────────┐
+│       HERMES AGENT        │
+└─────────────┬─────────────┘
+              │
+              │ vLLM Tokens
+              │
+──────────────┼── FRONTEND NETWORK · Mgmt · User ───────────────────────────────────┼────────────
+              │                                                                     │
+┌─────────────┴──────────────────────────────┐   ┌─────────────────────────────────┴──────────┐
+│               HOST 1                       │   │               HOST 2                       │
+│         Frontend (192.168.5.11)            │   │         Frontend (192.168.5.12)            │
+│                                            │   │                                            │
+│  ┌──────────────────────────────────────┐  │   │                                            │
+│  │ vLLM Server                    :8000 │  │   │                                            │
+│  └──────────────────────────────────────┘  │   │                                            │
+│  ┌──────────────────────────────────────┐  │   │  ┌──────────────────────────────────────┐  │
+│  │ Ray Head                       :6379 │  │   │  │ Ray Worker                     :6379 │  │
+│  └──────────────────────────────────────┘  │   │  └──────────────────────────────────────┘  │
+│                                            │   │                                            │
+│  ┌────────────────┐  ┌────────────────┐    │   │  ┌────────────────┐  ┌────────────────┐    │
+│  │     GPU 1      │  │     GPU 2      │    │   │  │     GPU 1      │  │     GPU 2      │    │
+│  └────────────────┘  └────────────────┘    │   │  └────────────────┘  └────────────────┘    │
+│                                            │   │                                            │
+│         Backend (1.1.1.11)                 │   │         Backend (1.1.1.12)                 │
+└─────────────┬──────────────────────────────┘   └─────────────────────────────────┬──────────┘
+              │                                                                    │
+──────────────┴── BACKEND NETWORK · Ray Control Plane · NCCL/RoCE ─────────────────┴──────────
 
 **Key points about this setup:**
 - **Single vLLM host**: The vLLM server process runs on only one host (Host 1 with IP `VLLM_HOST_IP`).
